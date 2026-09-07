@@ -153,6 +153,7 @@ def run_all() -> list[dict]:
     configs += cascade
 
     seen = set()
+    configs_dedup = []
     for label, opts in configs:
         if label in seen:
             continue
