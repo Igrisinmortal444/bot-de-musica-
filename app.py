@@ -136,21 +136,41 @@ def run_all() -> list[dict]:
             }
             configs.append((f"{client}-con-cookies-po", cfg))
 
-    # Salida de los intentos (cascada del bot de video): default->relax->android->web_sdk
-    cascade = []
+    # bgutil POT provider: los proveedores se autodetectan. Probamos clientes que
+    # la guía de PO tokens recomienda (tv, web, mweb, android, default) con bgutil.
+    bgutil_configs = []
+    bgutil_base = {"http_headers": {"User-Agent": UA}}
     if os.path.isfile(COOKIES_PATH):
-        base = {"http_headers": {"User-Agent": UA}, "cookiefile": COOKIES_PATH}
-        cascade.append(("video-cascada-1-default", dict(base)))
-        relaxed = dict(base)
-        relaxed["format"] = "bv*+ba/b/wv*+wa/w"
-        cascade.append(("video-cascada-2-relax", relaxed))
-        android = dict(relaxed)
-        android["extractor_args"] = {"youtube": {"player_client": ["android", "tv", "android_vr"]}}
-        cascade.append(("video-cascada-3-android", android))
-        websdk = dict(relaxed)
-        websdk["extractor_args"] = {"youtube": {"player_client": ["tv", "web"]}}
-        cascade.append(("video-cascada-4-websdk", websdk))
-    configs += cascade
+        bgutil_base["cookiefile"] = COOKIES_PATH
+
+    for client in ["default", "android", "tv", "web", "mweb", "android_vr", "ios"]:
+        bg = dict(bgutil_base)
+        if client != "default":
+            bg["extractor_args"] = {"youtube": {"player_client": [client]}}
+        bgutil_configs.append((f"bgutil-{client}-con-cookies", bg))
+
+    # Variante de música con bgutil (con cookies, format de audio)
+    if os.path.isfile(COOKIES_PATH):
+        bgutil_configs.append(("bgutil-musica-bot", {
+            "http_headers": {"User-Agent": UA},
+            "cookiefile": COOKIES_PATH,
+            "format": "bestaudio[ext=m4a]/bestaudio/best",
+        }))
+        # Cliente tv con po_token usando el proveedor (guía recomienda tv)
+        bgutil_configs.append(("bgutil-tv-po", {
+            "http_headers": {"User-Agent": UA},
+            "cookiefile": COOKIES_PATH,
+            "extractor_args": {"youtube": {"player_client": ["tv"]}},
+        }))
+    configs += bgutil_configs
+
+    seen = set()
+    for label, opts in configs:
+        if label in seen:
+            continue
+        seen.add(label)
+        results.append(probe(label, **opts))
+    return results
 
     seen = set()
     configs_dedup = []

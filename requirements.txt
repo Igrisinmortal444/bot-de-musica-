@@ -1,2 +1,3 @@
 yt-dlp>=2025.1.0
 aiohttp>=3.9.0
+bgutil-ytdlp-pot-provider
