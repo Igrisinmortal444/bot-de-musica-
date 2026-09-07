@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import yt_dlp
 from aiohttp import web
@@ -156,13 +157,27 @@ def run_all() -> list[dict]:
         if label in seen:
             continue
         seen.add(label)
-        results.append(probe(label, **opts))
+        configs_dedup.append((label, opts))
+
+    CACHE = {}
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = {ex.submit(probe, label, **opts): label for label, opts in configs_dedup}
+        for fut in futures:
+            label = futures[fut]
+            r = fut.result()
+            CACHE[label] = r
+    results = [CACHE[l] for l, _ in configs_dedup]
     return results
 
 
 async def handler(request: web.Request) -> web.Response:
-    results = await asyncio.to_thread(run_all)
-    return web.json_response({"url": URL, "cookies": bool(os.path.isfile(COOKIES_PATH)), "results": results})
+    global CACHED
+    if CACHED is None:
+        CACHED = await asyncio.to_thread(run_all)
+    return web.json_response({"url": URL, "cookies": bool(os.path.isfile(COOKIES_PATH)), "results": CACHED})
+
+
+CACHED = None
 
 
 async def main() -> None:
