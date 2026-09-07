@@ -6,6 +6,7 @@ calidad con recodificaciones; te re-encode y recodifica solo si es necesario.
 """
 
 import asyncio
+import base64
 import glob
 import logging
 import os
@@ -38,8 +39,36 @@ def _get_sem() -> asyncio.Semaphore:
 AUDIO_EXTS = {".m4a", ".mp3", ".opus", ".ogg", ".oga", ".aac", ".wav", ".flac", ".webm"}
 ALLOWED_QUALITY = {"m4a", "mp3"}
 
+# Las IPs de datacenter (Render) suelen ser bloqueadas por YouTube con
+# "Sign in to confirm you're not a bot" o "The page needs to be reloaded".
+# Con estas cookies (sesión autenticada, exportada desde un navegador y
+# codificada en base64 como variable de entorno) las descargas funcionan.
+YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)/", re.IGNORECASE)
+YOUTUBE_SEARCH_RE = re.compile(r"^ytsearch\d*:", re.IGNORECASE)
 
-def _opts(outdir: str, quality: str) -> dict:
+# Clientes de respaldo en cascada por si el cliente por defecto falla.
+YOUTUBE_CLIENTS = ["android", "tv", "android_vr"]
+YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "") or ""
+YOUTUBE_COOKIES_PATH = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
+
+
+def _write_youtube_cookies() -> Optional[str]:
+    if not YOUTUBE_COOKIES_B64:
+        return None
+    try:
+        with open(YOUTUBE_COOKIES_PATH, "wb") as fh:
+            fh.write(base64.b64decode(YOUTUBE_COOKIES_B64))
+        return YOUTUBE_COOKIES_PATH
+    except Exception:  # noqa: BLE001
+        logger.exception("No se pudo escribir las cookies de YouTube")
+        return None
+
+
+def _is_youtube(source: str) -> bool:
+    return bool(YOUTUBE_RE.search(source) or YOUTUBE_SEARCH_RE.search(source))
+
+
+def _opts(outdir: str, quality: str, source: str) -> dict:
     postprocessors = []
     if quality == "mp3":
         postprocessors.append(
@@ -75,6 +104,11 @@ def _opts(outdir: str, quality: str) -> dict:
     if quality == "m4a":
         opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
 
+    if _is_youtube(source):
+        cookies_path = _write_youtube_cookies()
+        if cookies_path:
+            opts["cookiefile"] = cookies_path
+
     return opts
 
 
@@ -102,7 +136,7 @@ def _worker(
     progress_cb: Optional[Callable[[int], Awaitable[None]]],
     loop: Optional[asyncio.AbstractEventLoop],
 ) -> dict:
-    opts = _opts(outdir, quality)
+    opts = _opts(outdir, quality, source)
 
     if progress_cb is not None:
         def hook(data: dict):
@@ -119,8 +153,18 @@ def _worker(
 
         opts["progress_hooks"] = [hook]
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(source, download=True) or {}
+    attempts = _retry_attempts(opts, source, progress_cb, loop)
+    for i, attempt in enumerate(attempts, 1):
+        logger.info("Intento %d/%d de descarga", i, len(attempts))
+        try:
+            with yt_dlp.YoutubeDL(attempt) as ydl:
+                info = ydl.extract_info(source, download=True) or {}
+            break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Intento %d falló: %s", i, exc)
+            if i == len(attempts):
+                raise DownloadError(str(exc)) from exc
+            _flush_outdir(outdir)
 
     if info.get("_type") == "playlist":
         entries = info.get("entries") or [None]
@@ -147,6 +191,43 @@ def _worker(
         "ext": os.path.splitext(audio_path)[1].lstrip("."),
         "source": info.get("webpage_url") or source,
     }
+
+
+def _retry_attempts(
+    base: dict,
+    source: str,
+    progress_cb: Optional[Callable[[int], Awaitable[None]]],
+    loop: Optional[asyncio.AbstractEventLoop],
+) -> list[dict]:
+    """Para YouTube: reintenta con clientes alternativos en cascada, ya que
+    las IPs de datacenter suelen provocar 'Sign in to confirm you're not a bot'
+    o 'The page needs to be reloaded' con el cliente por defecto."""
+    if not _is_youtube(source):
+        return [base]
+
+    attempts = [base]
+
+    if progress_cb is not None:
+        return attempts
+
+    for clients in YOUTUBE_CLIENTS:
+        alt = dict(base)
+        alt["extractor_args"] = {
+            "youtube": {"player_client": [clients]}
+        }
+        attempts.append(alt)
+    return attempts
+
+
+def _flush_outdir(outdir: str) -> None:
+    for f in glob.glob(os.path.join(outdir, "*")):
+        try:
+            if os.path.isfile(f):
+                os.remove(f)
+            else:
+                shutil.rmtree(f, ignore_errors=True)
+        except OSError:
+            pass
 
 
 async def download(
