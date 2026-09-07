@@ -58,7 +58,7 @@ async def health_server() -> None:
     app.router.add_get("/", ok)
     app.router.add_get("/health", ok)
     port = int(os.getenv("PORT", "10000"))
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
