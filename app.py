@@ -84,85 +84,23 @@ def run_all() -> list[dict]:
     elif os.environ.get("DENO_BIN") and os.path.isfile(os.environ["DENO_BIN"]):
         js = {"js_runtimes": {"deno": {"path": os.environ["DENO_BIN"]}}}
 
-    configs = [
-        ("1-default-no-cookies", base_with_cookies()),
-        ("2-default-with-cookies", {**base_with_cookies(), **desktop_cookie_opts()}),
-    ]
-
-    # This is a bug in generation above (cookies applied twice, but fine).
-    # Build explicit list:
-    configs = [
-        ("default-sin-cookies", {"http_headers": {"User-Agent": UA}}),
-        ("default-con-cookies", {"http_headers": {"User-Agent": UA}, "cookiefile": COOKIES_PATH} if os.path.isfile(COOKIES_PATH) else {"http_headers": {"User-Agent": UA}}),
-    ]
-
-    jsset = js if js else None
-    for client in ["android", "tv", "web", "mweb", "android_vr", "ios"]:
-        for label, base in list(configs):
-            cfg = dict(base)
-            cfg["extractor_args"] = {"youtube": {"player_client": [client]}}
-            configs.append((f"{client}-con-cookies", cfg))
-
-    # Configuraciones con cookies, cliente por defecto (la del bot de música)
+    # SOLO bgutil: método real a validar. de a 1 para no reventar 512MB.
+    configs = []
     if os.path.isfile(COOKIES_PATH):
-        configs.append(("musica-bot", {
+        configs.append(("bgutil-musica-bot", {
             "http_headers": {"User-Agent": UA},
             "cookiefile": COOKIES_PATH,
             "format": "bestaudio[ext=m4a]/bestaudio/best",
         }))
-        configs.append(("musica-bot-mp3", {
-            "http_headers": {"User-Agent": UA},
-            "cookiefile": COOKIES_PATH,
-            "format": "bestaudio/best",
-        }))
-
-    # La que usa el bot de video exactamente (con cookies, cliente default)
-    if os.path.isfile(COOKIES_PATH):
-        configs.append(("video-bot-exacta", {
-            "http_headers": {"User-Agent": UA},
-            "cookiefile": COOKIES_PATH,
-            "format": "bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4][vcodec^=avc1]/bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b/wv*+wa/w",
-        }))
-
-    # js_runtime (po_token) con tv y web
-    for client in ["tv", "web"]:
-        if jsset:
-            cfg = {"http_headers": {"User-Agent": UA}}
-            if os.path.isfile(COOKIES_PATH):
-                cfg["cookiefile"] = COOKIES_PATH
-            cfg.update(jsset)
-            cfg["extractor_args"] = {
-                "youtube": {"player_client": [client]},
-            }
-            configs.append((f"{client}-con-cookies-po", cfg))
-
-    # bgutil POT provider: los proveedores se autodetectan. Probamos clientes que
-    # la guía de PO tokens recomienda (tv, web, mweb, android, default) con bgutil.
-    bgutil_configs = []
-    bgutil_base = {"http_headers": {"User-Agent": UA}}
-    if os.path.isfile(COOKIES_PATH):
-        bgutil_base["cookiefile"] = COOKIES_PATH
-
-    for client in ["default", "android", "tv", "web", "mweb", "android_vr", "ios"]:
-        bg = dict(bgutil_base)
-        if client != "default":
-            bg["extractor_args"] = {"youtube": {"player_client": [client]}}
-        bgutil_configs.append((f"bgutil-{client}-con-cookies", bg))
-
-    # Variante de música con bgutil (con cookies, format de audio)
-    if os.path.isfile(COOKIES_PATH):
-        bgutil_configs.append(("bgutil-musica-bot", {
-            "http_headers": {"User-Agent": UA},
-            "cookiefile": COOKIES_PATH,
-            "format": "bestaudio[ext=m4a]/bestaudio/best",
-        }))
-        # Cliente tv con po_token usando el proveedor (guía recomienda tv)
-        bgutil_configs.append(("bgutil-tv-po", {
+        configs.append(("bgutil-tv-po", {
             "http_headers": {"User-Agent": UA},
             "cookiefile": COOKIES_PATH,
             "extractor_args": {"youtube": {"player_client": ["tv"]}},
         }))
-    configs += bgutil_configs
+        configs.append(("bgutil-default", {
+            "http_headers": {"User-Agent": UA},
+            "cookiefile": COOKIES_PATH,
+        }))
 
     seen = set()
     for label, opts in configs:
