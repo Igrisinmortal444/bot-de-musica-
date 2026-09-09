@@ -216,6 +216,19 @@ def _retry_attempts(
             "youtube": {"player_client": [clients]}
         }
         attempts.append(alt)
+
+    if "m4a" in base.get("format", ""):
+        fallback = dict(base)
+        fallback["format"] = "bestaudio/best"
+        fallback["postprocessors"] = [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "m4a",
+                "preferredquality": "0",
+            },
+        ] + list(base.get("postprocessors", []))
+        attempts.append(fallback)
+
     return attempts
 
 
