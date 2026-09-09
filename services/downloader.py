@@ -159,7 +159,7 @@ def _worker(
         logger.info("Intento %d/%d de descarga", i, len(attempts))
         try:
             with yt_dlp.YoutubeDL(attempt) as ydl:
-                info = ydl.extract_info(source, download=True) or {}
+                info = ydl.extract_info(attempt.pop("_source", source), download=True) or {}
             break
         except Exception as exc:  # noqa: BLE001
             logger.warning("Intento %d falló: %s", i, exc)
@@ -218,16 +218,26 @@ def _retry_attempts(
         attempts.append(alt)
 
     if "m4a" in base.get("format", ""):
-        fallback = dict(base)
-        fallback["format"] = "bestaudio/best"
-        fallback["postprocessors"] = [
+        reencode = dict(base)
+        reencode["format"] = "bestaudio/best"
+        reencode["postprocessors"] = [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "m4a",
                 "preferredquality": "0",
             },
         ] + list(base.get("postprocessors", []))
-        attempts.append(fallback)
+        attempts.append(reencode)
+
+    # Si es una búsqueda por nombre ("ytsearch…:query"), como último recurso
+    # se reintenta en SoundCloud: es estable desde IPs de datacenter y baja el
+    # mejor formato de audio (MP3/AAC ~128 kbps) sin bloqueos anti-bot.
+    m = re.match(r"^ytsearch(\d*):(.*)$", source, re.IGNORECASE)
+    if m:
+        sc = dict(reencode) if "m4a" in base.get("format", "") else dict(base)
+        sc["_source"] = "scsearch{}:{}".format(int(m.group(1) or 1), m.group(2))
+        sc.pop("extractor_args", None)
+        attempts.append(sc)
 
     return attempts
 
