@@ -1,8 +1,21 @@
 FROM python:3.12-slim
 
+# ffmpeg para M4A/MP3 + herramientas para instalar Deno y el provider de POT
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg curl unzip git ca-certificates \
+    && curl -fsSL https://deno.land/install.sh | sh \
     && rm -rf /var/lib/apt/lists/*
+
+ENV DENO_BIN=/root/.deno/bin/deno
+ENV PATH="/root/.deno/bin:${PATH}"
+
+# bgutil POT provider (genera los tokens 'proof-of-origin' que YouTube exige
+# a las IPs de datacenter como las de Render)
+RUN git clone --single-branch --branch 2.0.0 \
+    https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
+    /root/bgutil-ytdlp-pot-provider \
+    && cd /root/bgutil-ytdlp-pot-provider/server \
+    && /root/.deno/bin/deno install --allow-scripts=npm:canvas --frozen
 
 WORKDIR /app
 
@@ -11,5 +24,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Pon tu token en el .env (monta el archivo como volumen opcional)
-CMD ["python", "bot.py"]
+EXPOSE 10000
+
+CMD ["/app/start.sh"]

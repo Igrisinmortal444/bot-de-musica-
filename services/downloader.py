@@ -47,7 +47,8 @@ YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)/", re.IGNORECASE)
 YOUTUBE_SEARCH_RE = re.compile(r"^ytsearch\d*:", re.IGNORECASE)
 
 # Clientes de respaldo en cascada por si el cliente por defecto falla.
-YOUTUBE_CLIENTS = ["android", "tv", "android_vr"]
+# ("web" generará un token POT vía bgutil cuando está disponible).
+YOUTUBE_CLIENTS = ["web", "android", "tv", "web_safari", "android_vr"]
 YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "") or ""
 YOUTUBE_COOKIES_PATH = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
 
@@ -201,14 +202,13 @@ def _retry_attempts(
 ) -> list[dict]:
     """Para YouTube: reintenta con clientes alternativos en cascada, ya que
     las IPs de datacenter suelen provocar 'Sign in to confirm you're not a bot'
-    o 'The page needs to be reloaded' con el cliente por defecto."""
+    o 'The page needs to be reloaded' con el cliente por defecto. El token POT
+    (Proof of Origin) generado por bgutil se usa automáticamente cuando el
+    servidor local está activo; ver Dockerfile y start.sh."""
     if not _is_youtube(source):
         return [base]
 
     attempts = [base]
-
-    if progress_cb is not None:
-        return attempts
 
     for clients in YOUTUBE_CLIENTS:
         alt = dict(base)
