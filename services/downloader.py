@@ -69,6 +69,39 @@ def _is_youtube(source: str) -> bool:
     return bool(YOUTUBE_RE.search(source) or YOUTUBE_SEARCH_RE.search(source))
 
 
+def _resolve_source(source: str) -> str:
+    """Para búsquedas 'ytsearch…:'/'scsearch…:' elige la pista más larga
+    (>= 60 s si existe) en lugar del primer hit, para no bajar teasers,
+    shorts o vistas previas de 30 segundos."""
+    m = re.match(r"^(yt|sc)search(\d*):(.*)$", source, re.IGNORECASE)
+    if not m:
+        return source
+    prefix, qn, query = m.group(1), m.group(2), m.group(3)
+    n = int(qn) if qn.isdigit() and int(qn) > 1 else 5
+    url = f"{prefix}search{n}:{query}"
+    try:
+        with yt_dlp.YoutubeDL(
+            {
+                "quiet": True,
+                "no_warnings": True,
+                "simulate": True,
+                "noplaylist": True,
+                "skip_download": True,
+            }
+        ) as ydl:
+            info = ydl.extract_info(url, download=False) or {}
+        entries = [e for e in (info.get("entries") or []) if e and e.get("duration")]
+        entries.sort(key=lambda e: e["duration"], reverse=True)
+        for e in entries:
+            if e["duration"] >= 60:
+                return e.get("webpage_url") or e.get("url") or source
+        if entries:
+            return entries[0].get("webpage_url") or entries[0].get("url") or source
+    except Exception:  # noqa: BLE001
+        logger.warning("No se pudo resolver la búsqueda %s", url)
+    return source
+
+
 def _opts(outdir: str, quality: str, source: str) -> dict:
     postprocessors = []
     if quality == "mp3":
@@ -137,7 +170,9 @@ def _worker(
     progress_cb: Optional[Callable[[int], Awaitable[None]]],
     loop: Optional[asyncio.AbstractEventLoop],
 ) -> dict:
-    opts = _opts(outdir, quality, source)
+    original = source
+    source = _resolve_source(source)
+    opts = _opts(outdir, quality, original)
 
     if progress_cb is not None:
         def hook(data: dict):
@@ -154,7 +189,7 @@ def _worker(
 
         opts["progress_hooks"] = [hook]
 
-    attempts = _retry_attempts(opts, source, progress_cb, loop)
+    attempts = _retry_attempts(opts, original, progress_cb, loop)
     for i, attempt in enumerate(attempts, 1):
         logger.info("Intento %d/%d de descarga", i, len(attempts))
         try:
@@ -235,7 +270,9 @@ def _retry_attempts(
     m = re.match(r"^ytsearch(\d*):(.*)$", source, re.IGNORECASE)
     if m:
         sc = dict(reencode) if "m4a" in base.get("format", "") else dict(base)
-        sc["_source"] = "scsearch{}:{}".format(int(m.group(1) or 1), m.group(2))
+        sc["_source"] = _resolve_source(
+            "scsearch{}:{}".format(int(m.group(1) or 1), m.group(2))
+        )
         sc.pop("extractor_args", None)
         attempts.append(sc)
 
