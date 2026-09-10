@@ -252,7 +252,7 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "m4a",
-                "preferredquality": "0",
+                "preferredquality": "192",
             },
         ] + list(base.get("postprocessors", []))
 
