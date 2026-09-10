@@ -48,9 +48,9 @@ YOUTUBE_SEARCH_RE = re.compile(r"^ytsearch\d*:", re.IGNORECASE)
 
 # Clientes de respaldo en cascada por si el cliente por defecto falla.
 # ("web" generará un token POT vía bgutil cuando está disponible).
-# quit actions android/tv/vr/web_safari: desde datacenters traen solo opus y
-# devuelven "Requested format is not available"; web/mweb/ios sí sirven M4A.
-YOUTUBE_CLIENTS = ["web", "web_embedded", "mweb", "ios"]
+# Pocos pero efectivos: android/tv/ios dan "format not available" y
+# web_embedded repite "reloaded" igual que web → se omiten por velocidad.
+YOUTUBE_CLIENTS = ["web", "mweb", "ios"]
 YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "") or ""
 YOUTUBE_COOKIES_PATH = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
 
@@ -132,8 +132,8 @@ def _opts(outdir: str, quality: str, source: str) -> dict:
         "restrictfilenames": True,
         "writethumbnail": True,
         "nocheckcertificate": True,
-        "socket_timeout": 25,
-        "retries": 3,
+        "socket_timeout": 15,
+        "retries": 2,
         "fragment_retries": 3,
         "concurrent_fragment_downloads": 8,
         "buffersize": 1024 * 64,
@@ -257,8 +257,8 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
         ] + list(base.get("postprocessors", []))
 
     attempts: list[dict] = []
-    for ci, cand in enumerate(candidates[:3]):
-        combos = [None] + YOUTUBE_CLIENTS if ci == 0 else ["web", "mweb"]
+    for ci, cand in enumerate(candidates[:2]):
+        combos = [None] + YOUTUBE_CLIENTS if ci == 0 else ["mweb"]
         for cl in combos:
             alt = dict(base)
             if cl:
