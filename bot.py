@@ -73,6 +73,47 @@ async def health_server() -> None:
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"pot": "error", "error": str(exc)})
 
+    async def pot_log(_: web.Request) -> web.Response:
+        """Cola del log del servidor POT (últimas ~60 líneas)."""
+        try:
+            with open("/tmp/pot_provider.log", "r", encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()[-60:]
+            return web.json_response({"log": "".join(lines)})
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"log": "", "error": str(exc)})
+
+    async def yt_verbose(request: web.Request) -> web.Response:
+        """Autoprueba VERBOSE: corre yt-dlp real dentro del container y devuelve
+        la salida. Muestra si el POT genera el token, qué cliente responde, etc."""
+        import asyncio
+        import subprocess
+        import sys
+
+        vid = (request.query.get("id") or "dQw4w9WgXcQ").strip()
+        cl = (request.query.get("client") or "").strip()
+        search = (request.query.get("search") or "").strip()
+        if search:
+            target = f"ytsearch1:{search}"
+            post = ["--print", "%(id)s|%(title)s|%(duration)s"]
+        else:
+            target = f"https://www.youtube.com/watch?v={vid}"
+            post = ["--print", "%(title)s|%(duration)s|%(format_id)s"]
+        args = [
+            sys.executable, "-m", "yt_dlp", "-v", "--skip-download",
+            "--no-playlist", "--no-warnings", "--print", "URLOK",
+        ] + post
+        if cl:
+            args += ["--extractor-args", f"youtube:player_client={cl}"]
+        args += [target]
+        try:
+            proc = await asyncio.to_thread(
+                lambda: subprocess.run(args, capture_output=True, text=True, timeout=120, cwd="/app")
+            )
+            out = (proc.stdout or "") + (proc.stderr or "")
+            return web.json_response({"exit": proc.returncode, "clip": out[-4000:]})
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"error": str(exc)})
+
     async def yt_check(request: web.Request) -> web.Response:
         """Autoprueba: descarga una canción de YouTube dentro del container.
 
@@ -112,7 +153,9 @@ async def health_server() -> None:
     app.router.add_get("/", ok)
     app.router.add_get("/health", ok)
     app.router.add_get("/pot", pot_status)
+    app.router.add_get("/potlog", pot_log)
     app.router.add_get("/ytcheck", yt_check)
+    app.router.add_get("/ytcheckv", yt_verbose)
     port = int(os.getenv("PORT", "10000"))
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
