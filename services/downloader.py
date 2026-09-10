@@ -224,6 +224,10 @@ def _opts(outdir: str, quality: str, source: str) -> dict:
         "concurrent_fragment_downloads": 8,
         "buffersize": 1024 * 64,
         "max_filesize": MAX_UPLOAD_MB * 1024 * 1024,
+        # Solver de challenges JS de YouTube (firma/n-challenge). yt-dlp 2026 usa
+        # un runtime JS (deno) + un script de solver que se baja de GitHub la
+        # primera vez. Sin él, web da 'Some formats may be missing' / bot-check.
+        "remote_components": {"ejs:github", "ejs:npm"},
     }
 
     if quality == "m4a":
