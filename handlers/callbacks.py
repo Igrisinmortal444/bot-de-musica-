@@ -10,6 +10,9 @@ from telegram.ext import ContextTypes
 from handlers.commands import (
     HELP_TEXT,
     HOME_TEXT,
+    SEP,
+    SIGN,
+    STATS_TEXT,
     _cleanup,
     _make_progress,
     _send_audio,
@@ -24,6 +27,14 @@ import state
 logger = logging.getLogger(__name__)
 
 
+def _load_token(token: str) -> tuple[list | None, str]:
+    """Devuelve (resultados, origen) o (None, '') si caducó."""
+    payload = cache.get_token(token)
+    if not payload:
+        return None, ""
+    return payload["results"], payload.get("origin", "")
+
+
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     data = q.data or ""
@@ -34,15 +45,19 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await q.edit_message_text(HOME_TEXT, parse_mode="HTML", disable_web_page_preview=True, reply_markup=_help_kb())
         elif data == "ask_help":
             await q.edit_message_text(HELP_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+        elif data == "ask_stats":
+            await q.edit_message_text(_stats_text(), parse_mode="HTML")
         elif data == "ask_search":
             await q.edit_message_text(
-                "🎵 Escribe el <b>artista</b> y/o la <b>canción</b> que quieres.\n"
+                "🎵 <b>Buscar música</b>\n\n"
+                "Escribe el <b>artista</b> y/o la <b>canción</b> que quieres.\n"
                 "Ejemplo: <code>Quevedo Hotel Arizona</code>",
                 parse_mode="HTML",
             )
         elif data == "ask_link":
             await q.edit_message_text(
-                "🔗 Pásame el enlace de YouTube (o Spotify, SoundCloud…):\n"
+                "🔗 <b>Pasar enlace</b>\n\n"
+                "Pásame el enlace de YouTube (o Spotify, SoundCloud…):\n"
                 "<code>/link https://www.youtube.com/watch?v=…</code>",
                 parse_mode="HTML",
             )
@@ -65,6 +80,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _preview(q, context, token, int(idx))
     except TelegramError as exc:
         logger.warning("Callback fallido (%s): %s", data, exc)
+    except ValueError:
+        logger.warning("Callback malformado: %s", data)
     except Exception:  # noqa: BLE001
         logger.exception("Error procesando callback %s", data)
 
@@ -72,15 +89,30 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def _help_kb():
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🎵 Buscar música", callback_data="ask_search"),
-             InlineKeyboardButton("🔗 Pasar enlace", callback_data="ask_link")],
-            [InlineKeyboardButton("❓ Ayuda", callback_data="ask_help")],
+            [
+                InlineKeyboardButton("🎵 Buscar música", callback_data="ask_search"),
+                InlineKeyboardButton("🔗 Pasar enlace", callback_data="ask_link"),
+            ],
+            [
+                InlineKeyboardButton("📊 Estadísticas", callback_data="ask_stats"),
+                InlineKeyboardButton("❓ Ayuda", callback_data="ask_help"),
+            ],
         ]
     )
 
 
+def _stats_text() -> str:
+    import time
+    uptime = int(time.time() - state.started_at)
+    h, rem = divmod(uptime, 3600)
+    m, s = divmod(rem, 60)
+    return STATS_TEXT.format(
+        searches=state.searches, downloads=state.downloads, up=f"{h}h {m}m {s}s"
+    )
+
+
 def _get_item(token: str, idx: int) -> dict | None:
-    results = cache.get_token(token)
+    results, _ = _load_token(token)
     if not results:
         return None
     try:
@@ -94,19 +126,36 @@ async def _pick_quality(q, token: str, idx: int) -> None:
     if not item:
         await q.edit_message_text("⌛️ Los resultados caducaron. Vuelve a buscar.")
         return
+
+    extra = []
+    if item.get("album"):
+        extra.append(ht(item["album"]))
+    if item.get("year"):
+        extra.append(f"🗓 {ht(item['year'])}")
+    if item.get("duration"):
+        extra.append(f"⏱ {item['duration'] // 60}:{item['duration'] % 60:02d}")
+
     kb = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🔊 Mejor calidad · M4A", callback_data=f"dl:{token}:{idx}:m4a")],
-            [InlineKeyboardButton("💿 MP3 320 kbps", callback_data=f"dl:{token}:{idx}:mp3")],
+            [
+                InlineKeyboardButton("🔊 Mejor calidad · M4A", callback_data=f"dl:{token}:{idx}:m4a"),
+                InlineKeyboardButton("💿 MP3 320 kbps", callback_data=f"dl:{token}:{idx}:mp3"),
+            ],
             [InlineKeyboardButton("▶️ Vista previa 30 s", callback_data=f"pv:{token}:{idx}")],
-            [InlineKeyboardButton("🔙 Volver a resultados", callback_data=f"back:{token}")],
+            [
+                InlineKeyboardButton("🔙 Resultados", callback_data=f"back:{token}"),
+                InlineKeyboardButton("🏠 Inicio", callback_data="home"),
+            ],
         ]
     )
     text = (
         f"🎧 <b>{ht(item['title'])}</b>\n"
         f"👤 {ht(item['artist'])}\n"
-        f"💿 {ht(item.get('album') or 'Sencillo')}\n\n"
-        f"<b>Elige la calidad:</b>"
+        + (f"💿 {', '.join(extra)}\n\n" if extra else "\n")
+        + "━━━━━━━━━━━━━━━━\n"
+        + "<b>Elige la calidad:</b>\n"
+        "🔊 M4A · calidad nativa (máxima)\n"
+        "💿 MP3 320 · el clásico universal"
     )
     await q.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
 
@@ -127,7 +176,11 @@ async def _start_download(q, context: ContextTypes.DEFAULT_TYPE, token: str, idx
         res = await downloader.download(query, quality, _make_progress(status))
     except downloader.DownloadError as exc:
         logger.warning("Descarga fallida: %s", exc)
-        await status.edit_text("❌ No pude descargar esa canción.\nInténtalo de nuevo o prueba con el enlace de YouTube.")
+        await status.edit_text(
+            "❌ <b>No pude descargar esa canción.</b>\n"
+            "Inténtalo de nuevo o pásame el enlace de YouTube.",
+            parse_mode="HTML",
+        )
         return
 
     artwork = None
@@ -136,7 +189,12 @@ async def _start_download(q, context: ContextTypes.DEFAULT_TYPE, token: str, idx
             artwork = await search_api.download_artwork(item["artwork"])
         await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
         await _send_audio(context.bot, chat_id, res, extra_thumb=artwork)
-        await status.edit_text("✅ ¡Enviado! Disfrútala 🎧\n¿Buscamos otra? /search")
+        label = "💿 MP3 320" if quality == "mp3" else "🔊 M4A"
+        await status.edit_text(
+            f"✅ <b>¡Enviado! Disfrútala 🎧</b>\n{label} · {ht(item['artist'])} — {ht(item['title'])}\n"
+            f"\n{SIGN}",
+            parse_mode="HTML",
+        )
     except Exception:  # noqa: BLE001
         logger.exception("Fallo al enviar el audio")
         try:
@@ -162,7 +220,7 @@ async def _preview(q, context: ContextTypes.DEFAULT_TYPE, token: str, idx: int) 
             title=item["title"][:120],
             performer=item["artist"][:120],
             duration=item.get("duration"),
-            caption="▶️ <b>Vista previa</b> · 30 segundos",
+            caption=f"▶️ <b>Vista previa</b> · 30 segundos\n\n{SIGN}",
             parse_mode="HTML",
         )
     except TelegramError:

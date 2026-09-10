@@ -44,7 +44,7 @@ ALLOWED_QUALITY = {"m4a", "mp3"}
 # Con estas cookies (sesión autenticada, exportada desde un navegador y
 # codificada en base64 como variable de entorno) las descargas funcionan.
 YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)/", re.IGNORECASE)
-YOUTUBE_SEARCH_RE = re.compile(r"^ytsearch\d*:", re.IGNORECASE)
+YOUTUBE_SEARCH_RE = re.compile(r"^(yt|ym)search\d*:", re.IGNORECASE)
 
 # Clientes de respaldo en cascada por si el cliente por defecto falla.
 # ("web" generará un token POT vía bgutil cuando está disponible).
@@ -72,11 +72,11 @@ def _is_youtube(source: str) -> bool:
 
 
 def _resolve_source(source: str) -> list[str]:
-    """Para búsquedas 'ytsearch…:'/'scsearch…:' devuelve hasta 3 candidatos
-    ordenados por duración (el más largo primero), para no bajar teasers,
-    shorts o vistas previas de 30 segundos. También permite reintentar con
-    otro video si el primero está bloqueado desde la IP del datacenter."""
-    m = re.match(r"^(yt|sc)search(\d*):(.*)$", source, re.IGNORECASE)
+    """Para búsquedas 'ytsearch…:'/'ymsearch…:'/'scsearch…:' devuelve hasta 3
+    candidatos ordenados por duración (el más largo primero), para no bajar
+    teasers, shorts o vistas previas de 30 segundos. También permite reintentar
+    con otro video si el primero está bloqueado desde la IP del datacenter."""
+    m = re.match(r"^(yt|ym|sc)search(\d*):(.*)$", source, re.IGNORECASE)
     if not m:
         return [source]
     prefix, qn, query = m.group(1), m.group(2), m.group(3)
@@ -142,6 +142,8 @@ def _opts(outdir: str, quality: str, source: str) -> dict:
 
     if quality == "m4a":
         opts["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+    else:
+        opts["format"] = "bestaudio[abr>=160]/bestaudio[abr>=128]/bestaudio/best"
 
     if _is_youtube(source):
         cookies_path = _write_youtube_cookies()
@@ -157,6 +159,29 @@ def _newest_audio(outdir: str) -> Optional[str]:
         if os.path.splitext(f)[1].lower() in AUDIO_EXTS:
             files.append(f)
     return max(files, key=os.path.getmtime) if files else None
+
+
+def _clean_title(title: str) -> str:
+    """Quita lo de "(Official Video)", "(Audio)", "(Lyrics)"… y espacios sueltos."""
+    t = title or ""
+    t = re.sub(
+        r"(?i)\s*[\(\[]\s*(official\s+)?(music\s+)?(video|audio|lyric(s)?|vídeo|audio oficial)\s*(hd|4k|8k)?\s*[\)\]]",
+        " ",
+        t,
+    )
+    return re.sub(r"\s+", " ", t).strip(" \t-–—|")
+
+
+def _guess_artist(title: str) -> Optional[str]:
+    """Si el título es 'Artista - Canción', devuelve la primera parte limpia."""
+    if not title or " - " not in title:
+        return None
+    prefix = title.split(" - ")[0].strip()
+    if not (0 < len(prefix) <= 40):
+        return None
+    if re.search(r"[\(\[\d:\-–]", prefix):
+        return None
+    return prefix
 
 
 def _thumb_for(stem: str, outdir: str) -> Optional[str]:
@@ -218,9 +243,14 @@ def _worker(
     thumb = _thumb_for(os.path.splitext(audio_path)[0], outdir)
 
     artist = info.get("artist") or info.get("channel") or info.get("uploader")
-    title = info.get("title") or "Música"
-    if not artist and title and " - " in title:
+    title = _clean_title(info.get("title") or "Música")
+    prefix = _guess_artist(title)
+    if prefix and (not artist or artist == info.get("channel") or artist == info.get("uploader")):
+        artist = prefix
+    if not artist:
         artist = title.split(" - ")[0].strip()
+    if artist and artist.lower().endswith((" - topic", "- topic")):
+        artist = re.sub(r"(?i)\s*-\s*topic\s*$", "", artist).strip()
 
     return {
         "outdir": outdir,
@@ -240,7 +270,7 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
     de datacenter suelen provocar 'Sign in…'/'The page needs to be reloaded' con
     un video y/o cliente concreto. El token POT (Proof of Origin) de bgutil se
     usa automáticamente cuando el servidor local está activo. Como último
-    recurso se busca en SoundCloud (MP3/AAC ~128 kbps)."""
+    recurso se busca la misma canción en YouTube Music y en SoundCloud."""
     if not _is_youtube(candidates[0]):
         return [base]
 
@@ -257,6 +287,15 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
         ] + list(base.get("postprocessors", []))
 
     attempts: list[dict] = []
+    seen: set[str] = set()
+
+    def _push(item: dict) -> None:
+        src = item.get("_source")
+        if src in seen:
+            return
+        seen.add(src)
+        attempts.append(item)
+
     for ci, cand in enumerate(candidates[:2]):
         combos = [None] + YOUTUBE_CLIENTS if ci == 0 else ["mweb"]
         for cl in combos:
@@ -266,20 +305,23 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
                     "youtube": {"player_client": [cl]}
                 }
             alt["_source"] = cand
-            attempts.append(alt)
+            _push(alt)
         if reencode is not None:
             fallback = dict(reencode)
             fallback["_source"] = cand
-            attempts.append(fallback)
+            _push(fallback)
 
-    m = re.match(r"^ytsearch(\d*):(.*)$", original, re.IGNORECASE)
+    m = re.match(r"^(yt|ym)search(\d*):(.*)$", original, re.IGNORECASE)
     if m:
-        sc = dict(reencode) if reencode else dict(base)
-        sc["_source"] = _resolve_source(
-            "scsearch{}:{}".format(int(m.group(1) or 1), m.group(2))
-        )[0]
-        sc.pop("extractor_args", None)
-        attempts.append(sc)
+        query = m.group(3)
+        qn = int(m.group(2)) if m.group(2).isdigit() and int(m.group(2)) > 1 else 1
+        fb_tpl = dict(reencode) if reencode else dict(base)
+        for prefix in ("ymsearch", "scsearch"):
+            for cand in _resolve_source(f"{prefix}{qn}:{query}")[:2]:
+                fb = dict(fb_tpl)
+                fb["_source"] = cand
+                fb.pop("extractor_args", None)
+                _push(fb)
 
     return attempts
 

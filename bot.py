@@ -18,12 +18,13 @@ from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
+    InlineQueryHandler,
     filters,
     MessageHandler,
 )
 
 from config import BOT_TOKEN
-from handlers import callbacks, commands
+from handlers import callbacks, commands, inline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +44,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("link", commands.link))
     app.add_handler(CommandHandler("stats", commands.stats))
     app.add_handler(CallbackQueryHandler(callbacks.handle))
+    app.add_handler(InlineQueryHandler(inline.inline_query))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, commands.on_message))
 
     return app
