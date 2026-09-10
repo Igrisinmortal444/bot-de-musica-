@@ -71,13 +71,14 @@ def _is_youtube(source: str) -> bool:
     return bool(YOUTUBE_RE.search(source) or YOUTUBE_SEARCH_RE.search(source))
 
 
-def _resolve_source(source: str) -> str:
-    """Para búsquedas 'ytsearch…:'/'scsearch…:' elige la pista más larga
-    (>= 60 s si existe) en lugar del primer hit, para no bajar teasers,
-    shorts o vistas previas de 30 segundos."""
+def _resolve_source(source: str) -> list[str]:
+    """Para búsquedas 'ytsearch…:'/'scsearch…:' devuelve hasta 3 candidatos
+    ordenados por duración (el más largo primero), para no bajar teasers,
+    shorts o vistas previas de 30 segundos. También permite reintentar con
+    otro video si el primero está bloqueado desde la IP del datacenter."""
     m = re.match(r"^(yt|sc)search(\d*):(.*)$", source, re.IGNORECASE)
     if not m:
-        return source
+        return [source]
     prefix, qn, query = m.group(1), m.group(2), m.group(3)
     n = int(qn) if qn.isdigit() and int(qn) > 1 else 5
     url = f"{prefix}search{n}:{query}"
@@ -94,14 +95,16 @@ def _resolve_source(source: str) -> str:
             info = ydl.extract_info(url, download=False) or {}
         entries = [e for e in (info.get("entries") or []) if e and e.get("duration")]
         entries.sort(key=lambda e: e["duration"], reverse=True)
+        out = []
         for e in entries:
-            if e["duration"] >= 60:
-                return e.get("webpage_url") or e.get("url") or source
-        if entries:
-            return entries[0].get("webpage_url") or entries[0].get("url") or source
+            cand = e.get("webpage_url") or e.get("url")
+            if cand and len(out) < 3:
+                out.append(cand)
+        if out:
+            return out
     except Exception:  # noqa: BLE001
         logger.warning("No se pudo resolver la búsqueda %s", url)
-    return source
+    return [source]
 
 
 def _opts(outdir: str, quality: str, source: str) -> dict:
@@ -173,7 +176,7 @@ def _worker(
     loop: Optional[asyncio.AbstractEventLoop],
 ) -> dict:
     original = source
-    source = _resolve_source(source)
+    candidates = _resolve_source(source)
     opts = _opts(outdir, quality, original)
 
     if progress_cb is not None:
@@ -191,12 +194,12 @@ def _worker(
 
         opts["progress_hooks"] = [hook]
 
-    attempts = _retry_attempts(opts, original, progress_cb, loop)
+    attempts = _retry_attempts(opts, original, candidates)
     for i, attempt in enumerate(attempts, 1):
         logger.info("Intento %d/%d de descarga", i, len(attempts))
         try:
             with yt_dlp.YoutubeDL(attempt) as ydl:
-                info = ydl.extract_info(attempt.pop("_source", source), download=True) or {}
+                info = ydl.extract_info(attempt.pop("_source", candidates[0]), download=True) or {}
             break
         except Exception as exc:  # noqa: BLE001
             logger.warning("Intento %d falló: %s", i, exc)
@@ -231,29 +234,17 @@ def _worker(
     }
 
 
-def _retry_attempts(
-    base: dict,
-    source: str,
-    progress_cb: Optional[Callable[[int], Awaitable[None]]],
-    loop: Optional[asyncio.AbstractEventLoop],
-) -> list[dict]:
-    """Para YouTube: reintenta con clientes alternativos en cascada, ya que
-    las IPs de datacenter suelen provocar 'Sign in to confirm you're not a bot'
-    o 'The page needs to be reloaded' con el cliente por defecto. El token POT
-    (Proof of Origin) generado por bgutil se usa automáticamente cuando el
-    servidor local está activo; ver Dockerfile y start.sh."""
-    if not _is_youtube(source):
+def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[dict]:
+    """Para YouTube: prueba varios videos candidatos (los 3 más largos de la
+    búsqueda) y, para cada uno, varios clientes (web/mweb/ios…), ya que las IPs
+    de datacenter suelen provocar 'Sign in…'/'The page needs to be reloaded' con
+    un video y/o cliente concreto. El token POT (Proof of Origin) de bgutil se
+    usa automáticamente cuando el servidor local está activo. Como último
+    recurso se busca en SoundCloud (MP3/AAC ~128 kbps)."""
+    if not _is_youtube(candidates[0]):
         return [base]
 
-    attempts = [base]
-
-    for clients in YOUTUBE_CLIENTS:
-        alt = dict(base)
-        alt["extractor_args"] = {
-            "youtube": {"player_client": [clients]}
-        }
-        attempts.append(alt)
-
+    reencode = None
     if "m4a" in base.get("format", ""):
         reencode = dict(base)
         reencode["format"] = "bestaudio/best"
@@ -264,17 +255,29 @@ def _retry_attempts(
                 "preferredquality": "0",
             },
         ] + list(base.get("postprocessors", []))
-        attempts.append(reencode)
 
-    # Si es una búsqueda por nombre ("ytsearch…:query"), como último recurso
-    # se reintenta en SoundCloud: es estable desde IPs de datacenter y baja el
-    # mejor formato de audio (MP3/AAC ~128 kbps) sin bloqueos anti-bot.
-    m = re.match(r"^ytsearch(\d*):(.*)$", source, re.IGNORECASE)
+    attempts: list[dict] = []
+    for ci, cand in enumerate(candidates[:3]):
+        combos = [None] + YOUTUBE_CLIENTS if ci == 0 else ["web", "mweb"]
+        for cl in combos:
+            alt = dict(base)
+            if cl:
+                alt["extractor_args"] = {
+                    "youtube": {"player_client": [cl]}
+                }
+            alt["_source"] = cand
+            attempts.append(alt)
+        if reencode is not None:
+            fallback = dict(reencode)
+            fallback["_source"] = cand
+            attempts.append(fallback)
+
+    m = re.match(r"^ytsearch(\d*):(.*)$", original, re.IGNORECASE)
     if m:
-        sc = dict(reencode) if "m4a" in base.get("format", "") else dict(base)
+        sc = dict(reencode) if reencode else dict(base)
         sc["_source"] = _resolve_source(
             "scsearch{}:{}".format(int(m.group(1) or 1), m.group(2))
-        )
+        )[0]
         sc.pop("extractor_args", None)
         attempts.append(sc)
 
