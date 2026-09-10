@@ -247,7 +247,7 @@ def _worker(
     prefix = _guess_artist(title)
     if prefix and (not artist or artist == info.get("channel") or artist == info.get("uploader")):
         artist = prefix
-    if not artist:
+    if not artist and " - " in title:
         artist = title.split(" - ")[0].strip()
     if artist and artist.lower().endswith((" - topic", "- topic")):
         artist = re.sub(r"(?i)\s*-\s*topic\s*$", "", artist).strip()
