@@ -17,6 +17,11 @@ RUN git clone --single-branch --branch 2.0.0 \
     && cd /root/bgutil-ytdlp-pot-provider/server \
     && /root/.deno/bin/deno install --allow-scripts=npm:canvas --frozen
 
+# Pre-compila el grafo del servidor POT en el build para que arranque al
+# instante en runtime (el primer 'deno run' tardaría ~2 min transpilando).
+COPY warmup_pot.sh /tmp/warmup_pot.sh
+RUN chmod +x /tmp/warmup_pot.sh && /tmp/warmup_pot.sh || true
+
 WORKDIR /app
 
 COPY requirements.txt .

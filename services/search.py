@@ -112,6 +112,7 @@ async def deezer_search(query: str, limit: int = 12) -> list[dict]:
         year = (row.get("release_date") or album.get("release_date") or "")[:4]
         results.append(
             {
+                "deezer_id": (row.get("id") or ""),
                 "artist": artist,
                 "title": title,
                 "album": (album.get("title") or "").strip(),
