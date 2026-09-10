@@ -1,9 +1,6 @@
 """Respuestas a los botones del menú (callback queries)."""
 
-import asyncio
 import logging
-import shutil
-import tempfile
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
@@ -22,7 +19,7 @@ from handlers.commands import (
     ht,
     _send_page,
 )
-from services import cache, deezer, downloader
+from services import cache, downloader
 from services import search as search_api
 
 import state
@@ -172,47 +169,20 @@ async def _start_download(q, context: ContextTypes.DEFAULT_TYPE, token: str, idx
     state.downloads += 1
     chat_id = q.message.chat_id
     status = await context.bot.send_message(chat_id, "⏳ Preparando la descarga…")
-    res = None
-    via = None
 
-    # 1) Deezer en MP3 320 (HQ con metadatos y carátula) si hay ARL. Usa el
-    #    ID de Deezer del resultado o lo busca si no viene.
-    dz_id = item.get("deezer_id")
-    if deezer.active() and (dz_id or item.get("artist")):
-        if not dz_id:
-            dz_id = await asyncio.to_thread(
-                deezer.search_track_id, item.get("artist", ""), item.get("title", "")
-            )
-        if dz_id:
-            deezer_out = tempfile.mkdtemp(prefix="musicbot_dz_")
-            try:
-                await status.edit_text("🎧 Descargando desde <b>Deezer</b> (MP3 320)…", parse_mode="HTML")
-                await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
-                res = await asyncio.to_thread(deezer.download_track, deezer_out, dz_id)
-                if res:
-                    via = "deezer"
-                else:
-                    shutil.rmtree(deezer_out, ignore_errors=True)
-            except Exception:  # noqa: BLE001
-                logger.exception("Fallo en Deezer; se intenta SoundCloud")
-                shutil.rmtree(deezer_out, ignore_errors=True)
-
-    # 2) SoundCloud (independiente, música real de artistas y remixes).
-    if res is None:
-        query = f"scsearch1:{item['artist']} - {item['title']}"
-        await status.edit_text("🔊 Buscando la canción en <b>SoundCloud</b>…", parse_mode="HTML")
-        await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
-        try:
-            res = await downloader.download(query, quality, _make_progress(status))
-            via = "soundcloud"
-        except downloader.DownloadError as exc:
-            logger.warning("Descarga fallida: %s", exc)
-            await status.edit_text(
-                "❌ <b>No pude descargar esa canción.</b>\n"
-                "Inténtalo de nuevo o pásame el enlace directo.",
-                parse_mode="HTML",
-            )
-            return
+    query = f"scsearch1:{item['artist']} - {item['title']}"
+    await status.edit_text("🔊 Buscando la canción en <b>SoundCloud</b>…", parse_mode="HTML")
+    await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
+    try:
+        res = await downloader.download(query, quality, _make_progress(status))
+    except downloader.DownloadError as exc:
+        logger.warning("Descarga fallida: %s", exc)
+        await status.edit_text(
+            "❌ <b>No pude descargar esa canción.</b>\n"
+            "Inténtalo de nuevo o pásame el enlace directo.",
+            parse_mode="HTML",
+        )
+        return
 
     artwork = None
     try:
@@ -220,11 +190,10 @@ async def _start_download(q, context: ContextTypes.DEFAULT_TYPE, token: str, idx
             artwork = await search_api.download_artwork(item["artwork"])
         await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
         await _send_audio(context.bot, chat_id, res, extra_thumb=artwork)
-        label = "💿 MP3 320" if (res.get("ext") or "").lower() == "mp3" else "🔊 M4A"
-        source = "Deezer" if via == "deezer" else "SoundCloud"
+        label = "💿 MP3 320" if quality == "mp3" else "🔊 M4A"
         await status.edit_text(
             f"✅ <b>¡Enviado! Disfrútala 🎧</b>\n{label} · {ht(item['artist'])} — {ht(item['title'])}\n"
-            f"Fuente: {source}\n{SIGN}",
+            f"\n{SIGN}",
             parse_mode="HTML",
         )
     except Exception:  # noqa: BLE001

@@ -53,12 +53,66 @@ def build_app() -> Application:
 async def health_server() -> None:
     """Servidor HTTP de salud para Render ($PORT); el bot sigue en polling."""
 
+    from services import downloader
+
     async def ok(_: web.Request) -> web.Response:
         return web.Response(text="ok")
+
+    async def pot_status(_: web.Request) -> web.Response:
+        """Estado del servidor POT (para depurar desde fuera)."""
+        import json
+        import urllib.request
+
+        port = int(os.getenv("POT_PROVIDER_PORT", "4416"))
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/ping", timeout=3
+            ) as resp:
+                data = json.load(resp)
+            return web.json_response({"pot": "ok", **data})
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"pot": "error", "error": str(exc)})
+
+    async def yt_check(request: web.Request) -> web.Response:
+        """Autoprueba: descarga una canción de YouTube dentro del container.
+
+        Permite reproducir dentro de Render el MISMO camino que sigue el bot
+        (ytsearch1 → cascada de clientes → POT) y ver el error exacto aquí.
+        """
+        import asyncio
+        import time
+
+        q = (request.query.get("q") or "Never Gonna Give You Up").strip()
+        fmt = (request.query.get("fmt") or "m4a").strip().lower()
+        if fmt not in ("m4a", "mp3"):
+            fmt = "m4a"
+        t0 = time.time()
+        try:
+            res = await asyncio.wait_for(
+                downloader.download(f"ytsearch1:{q}", fmt, None), timeout=240
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "elapsed_s": round(time.time() - t0, 1),
+                    "title": res.get("title"),
+                    "artist": res.get("artist"),
+                    "duration_s": res.get("duration"),
+                    "ext": res.get("ext"),
+                    "bytes": os.path.getsize(res["file_path"]),
+                    "source": res.get("source"),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response(
+                {"ok": False, "elapsed_s": round(time.time() - t0, 1), "error": str(exc)}
+            )
 
     app = web.Application()
     app.router.add_get("/", ok)
     app.router.add_get("/health", ok)
+    app.router.add_get("/pot", pot_status)
+    app.router.add_get("/ytcheck", yt_check)
     port = int(os.getenv("PORT", "10000"))
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()

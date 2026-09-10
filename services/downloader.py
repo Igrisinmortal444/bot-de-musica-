@@ -47,10 +47,13 @@ YOUTUBE_RE = re.compile(r"(youtube\.com|youtu\.be)/", re.IGNORECASE)
 YOUTUBE_SEARCH_RE = re.compile(r"^(yt|ym)search\d*:", re.IGNORECASE)
 
 # Clientes de respaldo en cascada por si el cliente por defecto falla.
-# ("web" generará un token POT vía bgutil cuando está disponible).
-# Pocos pero efectivos: android/tv/ios dan "format not available" y
-# web_embedded repite "reloaded" igual que web → se omiten por velocidad.
-YOUTUBE_CLIENTS = ["web", "mweb", "ios"]
+# ("web" genera su token POT (proof-of-origin) vía bgutil cuando está activo).
+# Se prueban varios porque desde IPs de datacenter (Render) YouTube da
+# bot-check con unos clientes y con otros no:
+#   - tv_embedded / tv_simply: suelen dejar pasar sin PO token.
+#   - android / ios: formato limitado pero casi nunca bloquean.
+#   - mweb: útil cuando web falla.
+YOUTUBE_CLIENTS = ["web", "tv_embedded", "tv_simply", "mweb", "ios"]
 YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "") or ""
 YOUTUBE_COOKIES_PATH = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
 
@@ -380,7 +383,7 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
     # Cascada principal: 2 videos candidatos × varias clientes extra + un
     # intento re-encodificado por si el nativo da "not available".
     for ci, cand in enumerate(candidates[:2]):
-        combos = [None] + YOUTUBE_CLIENTS if ci == 0 else ["mweb"]
+        combos = [None] + YOUTUBE_CLIENTS if ci == 0 else ["mweb", "tv_embedded"]
         for cl in combos:
             alt = dict(base)
             if cl:

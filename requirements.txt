@@ -3,4 +3,3 @@ yt-dlp>=2026.8.19
 aiohttp>=3.9.0
 python-dotenv>=1.0.0
 bgutil-ytdlp-pot-provider>=1.3.2
-deemix>=3.6.6
