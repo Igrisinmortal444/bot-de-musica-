@@ -48,7 +48,9 @@ YOUTUBE_SEARCH_RE = re.compile(r"^ytsearch\d*:", re.IGNORECASE)
 
 # Clientes de respaldo en cascada por si el cliente por defecto falla.
 # ("web" generará un token POT vía bgutil cuando está disponible).
-YOUTUBE_CLIENTS = ["web", "android", "tv", "web_safari", "android_vr"]
+# quit actions android/tv/vr/web_safari: desde datacenters traen solo opus y
+# devuelven "Requested format is not available"; web/mweb/ios sí sirven M4A.
+YOUTUBE_CLIENTS = ["web", "web_embedded", "mweb", "ios"]
 YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "") or ""
 YOUTUBE_COOKIES_PATH = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
 
