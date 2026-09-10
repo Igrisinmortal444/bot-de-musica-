@@ -54,6 +54,19 @@ YOUTUBE_CLIENTS = ["web", "mweb", "ios"]
 YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "") or ""
 YOUTUBE_COOKIES_PATH = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
 
+USER_AGENT = "MusicPowerBot/1.0 (+https://t.me/MusicPowerBot)"
+
+# APIs públicas de búsqueda para esquivar el bot-check de YouTube desde IPs
+# de datacenter (Render): Piped y, en su defecto, Invidious.
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.moomoo.me",
+]
+INVIDIOUS_INSTANCES = [
+    "https://yewtu.be",
+    "https://invidious.nerdvpn.de",
+]
+
 
 def _write_youtube_cookies() -> Optional[str]:
     if not YOUTUBE_COOKIES_B64:
@@ -71,11 +84,74 @@ def _is_youtube(source: str) -> bool:
     return bool(YOUTUBE_RE.search(source) or YOUTUBE_SEARCH_RE.search(source))
 
 
+def _external_search(query: str) -> list[str]:
+    """Busca la canción en APIs públicas (Piped y, en su defecto, Invidious)
+    para esquivar el bot-check de YouTube desde IPs de datacenter (Render).
+    Devuelve hasta 3 URLs de video ordenadas de mayor a menor duración."""
+    import json
+    import urllib.parse
+    import urllib.request
+
+    quoted = urllib.parse.quote(query)
+
+    for base in PIPED_INSTANCES:
+        try:
+            req = urllib.request.Request(
+                f"{base}/search?q={quoted}&filter=music_songs",
+                headers={"User-Agent": USER_AGENT},
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.load(resp)
+            items = []
+            for it in data.get("items") or []:
+                url = it.get("url") or ""
+                dur = int(it.get("duration") or 0)
+                if not url or (dur and dur < 30):
+                    continue
+                items.append((dur, url))
+            items.sort(key=lambda x: x[0], reverse=True)
+            out = []
+            for _, url in items[:3]:
+                out.append("https://www.youtube.com" + url if url.startswith("/") else url)
+            if out:
+                logger.info("Búsqueda externa Piped: %d resultados", len(out))
+                return out
+        except Exception:  # noqa: BLE001
+            continue
+
+    for base in INVIDIOUS_INSTANCES:
+        try:
+            req = urllib.request.Request(
+                f"{base}/api/v1/search?q={quoted}&type=video",
+                headers={"User-Agent": USER_AGENT},
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.load(resp)
+            items = []
+            for it in data or []:
+                vid = it.get("videoId") or ""
+                dur = int(it.get("lengthSeconds") or 0)
+                if not vid or (dur and dur < 30):
+                    continue
+                items.append((dur, vid))
+            items.sort(key=lambda x: x[0], reverse=True)
+            if items:
+                out = [f"https://www.youtube.com/watch?v={vid}" for _, vid in items[:3]]
+                logger.info("Búsqueda externa Invidious: %d resultados", len(out))
+                return out
+        except Exception:  # noqa: BLE001
+            continue
+
+    return []
+
+
 def _resolve_source(source: str) -> list[str]:
     """Para búsquedas 'ytsearch…:'/'ymsearch…:'/'scsearch…:' devuelve hasta 3
     candidatos ordenados por duración (el más largo primero), para no bajar
     teasers, shorts o vistas previas de 30 segundos. También permite reintentar
-    con otro video si el primero está bloqueado desde la IP del datacenter."""
+    con otro video si el primero está bloqueado desde la IP del datacenter.
+    La resolución usa las cookies de YouTube; si el buscador de YouTube está
+    bloqueado (típico en datacenters), cae a las APIs públicas de Piped."""
     m = re.match(r"^(yt|ym|sc)search(\d*):(.*)$", source, re.IGNORECASE)
     if not m:
         return [source]
@@ -83,15 +159,17 @@ def _resolve_source(source: str) -> list[str]:
     n = int(qn) if qn.isdigit() and int(qn) > 1 else 5
     url = f"{prefix}search{n}:{query}"
     try:
-        with yt_dlp.YoutubeDL(
-            {
-                "quiet": True,
-                "no_warnings": True,
-                "simulate": True,
-                "noplaylist": True,
-                "skip_download": True,
-            }
-        ) as ydl:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "simulate": True,
+            "noplaylist": True,
+            "skip_download": True,
+        }
+        cookies_path = _write_youtube_cookies()
+        if cookies_path:
+            opts["cookiefile"] = cookies_path
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False) or {}
         entries = [e for e in (info.get("entries") or []) if e and e.get("duration")]
         entries.sort(key=lambda e: e["duration"], reverse=True)
@@ -102,8 +180,13 @@ def _resolve_source(source: str) -> list[str]:
                 out.append(cand)
         if out:
             return out
-    except Exception:  # noqa: BLE001
-        logger.warning("No se pudo resolver la búsqueda %s", url)
+        logger.warning("La búsqueda %s devolvió 0 resultados", url)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("No se pudo resolver la búsqueda %s: %s", url, exc)
+    if prefix in ("yt", "ym"):
+        ext = _external_search(query)
+        if ext:
+            return ext
     return [source]
 
 
@@ -287,15 +370,15 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
         ] + list(base.get("postprocessors", []))
 
     attempts: list[dict] = []
-    seen: set[str] = set()
 
     def _push(item: dict) -> None:
-        src = item.get("_source")
-        if src in seen:
-            return
-        seen.add(src)
+        # Los combos de cliente comparten el mismo _source (no se colapsan a
+        # propósito: cada uno lleva su propio extractor_args). Solo se deduplica
+        # explícitamente lo que se añade en los fallbacks de más abajo.
         attempts.append(item)
 
+    # Cascada principal: 2 videos candidatos × varias clientes extra + un
+    # intento re-encodificado por si el nativo da "not available".
     for ci, cand in enumerate(candidates[:2]):
         combos = [None] + YOUTUBE_CLIENTS if ci == 0 else ["mweb"]
         for cl in combos:
@@ -311,13 +394,22 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
             fallback["_source"] = cand
             _push(fallback)
 
+    # Fallbacks: buscar la misma canción en YouTube Music y SoundCloud.
+    # Aquí sí se deduplica, para no repetir el mismo source recuperado con
+    # la resolución interna (que ya probó esos clientes arriba).
     m = re.match(r"^(yt|ym)search(\d*):(.*)$", original, re.IGNORECASE)
     if m:
         query = m.group(3)
         qn = int(m.group(2)) if m.group(2).isdigit() and int(m.group(2)) > 1 else 1
         fb_tpl = dict(reencode) if reencode else dict(base)
-        for prefix in ("ymsearch", "scsearch"):
+        seen: set[str] = set()
+        for prefix in ("scsearch",):
             for cand in _resolve_source(f"{prefix}{qn}:{query}")[:2]:
+                if re.match(rf"^{prefix}\d*:", cand):
+                    continue  # no añadir búsquedas sin resolver (dan 404/scheme error)
+                if cand in seen:
+                    continue
+                seen.add(cand)
                 fb = dict(fb_tpl)
                 fb["_source"] = cand
                 fb.pop("extractor_args", None)
