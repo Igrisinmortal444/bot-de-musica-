@@ -48,9 +48,8 @@ HELP_TEXT = (
     "→ o escribe directamente: <i>Bad Bunny Monaco</i>\n\n"
     "<b>Descargar un enlace</b>\n"
     "→ /link <i>https://www.youtube.com/watch?v=…</i>\n\n"
-    "En la lista de resultados elige la <b>calidad</b>:\n"
-    "🔊 <b>M4A</b> = mejor calidad, formato nativo de YouTube\n"
-    "💿 <b>MP3 320</b> = el clásico compatible con todo\n\n"
+    "En la lista de resultados elige la canción y púlsala:\n"
+    "💿 <b>MP3 320 kbps</b> = el clásico compatible con todo\n\n"
     "<b>Tip:</b> también acepto enlaces de Spotify, SoundCloud, Deezer, Vimeo…\n"
     "Más info con /stats"
 )
@@ -214,7 +213,7 @@ async def _handle_link(update: Update, url: str) -> None:
 
     await update.effective_chat.send_action(ChatAction.UPLOAD_DOCUMENT)
     try:
-        res = await downloader.download(url, "m4a", _make_progress(status))
+        res = await downloader.download(url, "mp3", _make_progress(status))
     except downloader.DownloadError as exc:
         logger.warning("Descarga fallida: %s", exc)
         await status.edit_text(

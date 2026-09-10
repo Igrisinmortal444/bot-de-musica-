@@ -96,7 +96,6 @@ async def _pick_quality(q, token: str, idx: int) -> None:
         return
     kb = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🔊 Mejor calidad · M4A", callback_data=f"dl:{token}:{idx}:m4a")],
             [InlineKeyboardButton("💿 MP3 320 kbps", callback_data=f"dl:{token}:{idx}:mp3")],
             [InlineKeyboardButton("▶️ Vista previa 30 s", callback_data=f"pv:{token}:{idx}")],
             [InlineKeyboardButton("🔙 Volver a resultados", callback_data=f"back:{token}")],
@@ -106,7 +105,7 @@ async def _pick_quality(q, token: str, idx: int) -> None:
         f"🎧 <b>{ht(item['title'])}</b>\n"
         f"👤 {ht(item['artist'])}\n"
         f"💿 {ht(item.get('album') or 'Sencillo')}\n\n"
-        f"<b>Elige la calidad:</b>"
+        f"<b>Elige la opción:</b>"
     )
     await q.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
 
