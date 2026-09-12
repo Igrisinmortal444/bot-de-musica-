@@ -165,15 +165,13 @@ async def health_server() -> None:
 
 
 async def keepalive() -> None:
-    """Ping silencioso cada 13 min para evitar el sleep de Render (free: 15 min)."""
-    external = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-    if not external:
-        return
+    """Ping silencioso cada 10 min para evitar el sleep de Render (free: 15 min)."""
+    external = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/") or "https://bot-de-musica-1lem.onrender.com"
     url = f"{external}/health"
     timeout = ClientTimeout(total=15)
     async with ClientSession() as session:
         while True:
-            await asyncio.sleep(13 * 60)
+            await asyncio.sleep(10 * 60)
             try:
                 async with session.get(url, timeout=timeout) as resp:
                     await resp.read()
