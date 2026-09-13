@@ -148,6 +148,61 @@ def _external_search(query: str) -> list[str]:
     return []
 
 
+# yt-dlp 2026 bloquea Spotify por DRM, así que los enlaces de canción se
+# resuelven a una búsqueda en YouTube/YouTube Music y se descargan de ahí.
+SPOTIFY_RE = re.compile(
+    r"(?:open\.spotify\.com(?:/[^/\s\"']+)?/|spotify:)(track|album|playlist)[:/]([A-Za-z0-9]{10,})",
+    re.IGNORECASE,
+)
+
+
+def _spotify_track_info(source: str) -> Optional[dict]:
+    """Extrae canción/artista de un enlace de Spotify (track) usando la página
+    embed pública, sin API keys. Devuelve None si no hay datos para no romper
+    el flujo de descarga."""
+    import json
+    import urllib.request
+
+    m = SPOTIFY_RE.search(source)
+    if not m:
+        return None
+    kind, spot_id = m.group(1).lower(), m.group(2)
+    try:
+        req = urllib.request.Request(
+            f"https://open.spotify.com/embed/{kind}/{spot_id}",
+            headers={"User-Agent": USER_AGENT},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return None
+
+    i = html.find('"entity"')
+    if i == -1:
+        return None
+    entity = html[i:i + 4000]
+    if not re.search(r'"type":\s*"(track)"', entity):
+        logger.warning("Spotify: solo se soportan enlaces de canción (track)")
+        return None
+    info: dict = {}
+    m_title = re.search(r'"title":\s*"([^"]+)"', entity)
+    m_name = re.search(r'"name":\s*"([^"]+)"', entity)
+    m_dur = re.search(r'"duration":\s*(\d+)', entity)
+    m_art = re.search(r'"artists":\s*(\[[^]]*\])', entity)
+    info["title"] = m_title.group(1) if m_title else (m_name.group(1) if m_name else "")
+    if m_art:
+        try:
+            artists = json.loads(m_art.group(1))
+            info["artist"] = ", ".join(a.get("name", "") for a in artists if a.get("name"))
+        except Exception:  # noqa: BLE001
+            pass
+    if m_dur:
+        info["duration"] = int(m_dur.group(1)) // 1000
+    if not info.get("title") and not info.get("artist"):
+        return None
+    return info
+
+
 def _resolve_source(source: str) -> list[str]:
     """Para búsquedas 'ytsearch…:'/'ymsearch…:'/'scsearch…:' devuelve hasta 3
     candidatos ordenados por duración (el más largo primero), para no bajar
@@ -168,10 +223,17 @@ def _resolve_source(source: str) -> list[str]:
             "simulate": True,
             "noplaylist": True,
             "skip_download": True,
+            # El solver JS (deno en el contenedor) da el token POT para 'web';
+            # sin él, la búsqueda de YouTube desde IPs de datacenter da bot-check.
+            "remote_components": {"ejs:github", "ejs:npm"},
         }
         cookies_path = _write_youtube_cookies()
         if cookies_path:
             opts["cookiefile"] = cookies_path
+        if prefix in ("yt", "ym"):
+            opts["extractor_args"] = {
+                "youtube": {"player_client": ["web", "tv_embedded", "mweb"]}
+            }
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False) or {}
         entries = [e for e in (info.get("entries") or []) if e and e.get("duration")]
@@ -221,7 +283,7 @@ def _opts(outdir: str, quality: str, source: str) -> dict:
         "socket_timeout": 15,
         "retries": 2,
         "fragment_retries": 3,
-        "concurrent_fragment_downloads": 8,
+        "concurrent_fragment_downloads": 4,
         "buffersize": 1024 * 64,
         "max_filesize": MAX_UPLOAD_MB * 1024 * 1024,
         # Solver de challenges JS de YouTube (firma/n-challenge). yt-dlp 2026 usa
@@ -291,7 +353,17 @@ def _worker(
     loop: Optional[asyncio.AbstractEventLoop],
 ) -> dict:
     original = source
-    candidates = _resolve_source(source)
+    if SPOTIFY_RE.search(source):
+        spot = _spotify_track_info(source)
+        if spot:
+            title_q = (spot.get("title") or "").strip()
+            artist_q = (spot.get("artist") or "").strip()
+            if title_q and artist_q:
+                original = f"ytsearch1:{artist_q} - {title_q}"
+            else:
+                original = f"ytsearch1:{title_q or artist_q}"
+            logger.info("Spotify resuelto a descarga de YouTube: %s", original)
+    candidates = _resolve_source(original)
     opts = _opts(outdir, quality, original)
 
     if progress_cb is not None:

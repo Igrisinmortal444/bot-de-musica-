@@ -170,8 +170,8 @@ async def _start_download(q, context: ContextTypes.DEFAULT_TYPE, token: str, idx
     chat_id = q.message.chat_id
     status = await context.bot.send_message(chat_id, "⏳ Preparando la descarga…")
 
-    query = f"scsearch1:{item['artist']} - {item['title']}"
-    await status.edit_text("🔊 Buscando la canción en <b>SoundCloud</b>…", parse_mode="HTML")
+    query = f"ytsearch1:{item['artist']} - {item['title']}"
+    await status.edit_text("🔊 Buscando la canción en <b>YouTube</b>…", parse_mode="HTML")
     await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
     try:
         res = await downloader.download(query, quality, _make_progress(status))
