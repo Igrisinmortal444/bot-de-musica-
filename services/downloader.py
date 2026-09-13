@@ -462,23 +462,34 @@ def _worker(
         opts["progress_hooks"] = [hook]
 
     attempts = _retry_attempts(opts, original, candidates)
-    for i, attempt in enumerate(attempts, 1):
-        logger.info("Intento %d/%d de descarga", i, len(attempts))
+    n = len(attempts)
+    i = 0
+    while i < n:
+        attempt = attempts[i]
+        logger.info("Intento %d/%d de descarga", i + 1, n)
         try:
             with yt_dlp.YoutubeDL(attempt) as ydl:
                 info = ydl.extract_info(attempt.pop("_source", candidates[0]), download=True) or {}
             break
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Intento %d falló: %s", i, exc)
+            logger.warning("Intento %d falló: %s", i + 1, exc)
             if _is_bot_check_message(str(exc)):
                 _mark_yt_gated()
-            if i == len(attempts):
+                # Bot-check: saltar el resto de clientes de YouTube y pasar
+                # directo a los fallbacks de SoundCloud (sin martillar la IP).
+                jump = next((j for j in range(i + 1, n) if attempts[j].get("_sc_fallback")), None)
+                if jump is not None:
+                    i = jump
+                    _flush_outdir(outdir)
+                    continue
+            if i + 1 == n:
                 raise DownloadError(str(exc)) from exc
             _flush_outdir(outdir)
             # Pequeña pausa entre intentos: una ráfaga de peticiones rápidas
             # empeora el bot-check de YouTube desde IPs de datacenter.
             if _is_youtube(source):
                 time.sleep(1.5 + random.random() * 1.5)
+        i += 1
 
     if info.get("_type") == "playlist":
         entries = info.get("entries") or [None]
@@ -591,7 +602,8 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
 
     # Fallbacks: buscar la misma canción en otra plataforma (SoundCloud) al
     # agotar los intentos de YouTube. También cubre URLs directas de YouTube:
-    # se obtiene el título y se reintenta en SoundCloud.
+    # se obtiene el título y se reintenta en SoundCloud. Estos intentos se
+    # marcan para poder saltar a ellos si el bot-check aparece pronto.
     fb_query = _search_query(original) or _youtube_title(original, base)
     if fb_query and fb_query.strip():
         fb_tpl = dict(reencode) if reencode else dict(base)
@@ -603,6 +615,7 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
             fb = dict(fb_tpl)
             fb["_source"] = cand
             fb.pop("extractor_args", None)
+            fb["_sc_fallback"] = True
             _push(fb)
 
     return attempts
