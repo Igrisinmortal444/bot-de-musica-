@@ -426,6 +426,31 @@ def _worker(
     }
 
 
+def _youtube_title(source: str, base: dict) -> Optional[str]:
+    """Obtiene el título de un video de YouTube (solo metadatos) para poder
+    buscarlo en otra plataforma si su descarga falla desde el datacenter."""
+    if not YOUTUBE_RE.search(source):
+        return None
+    try:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "simulate": True,
+            "noplaylist": True,
+            "skip_download": True,
+            "remote_components": {"ejs:github", "ejs:npm"},
+            "extractor_args": {"youtube": {"player_client": ["tv_embedded", "android"]}},
+        }
+        if base.get("cookiefile"):
+            opts["cookiefile"] = base["cookiefile"]
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(source, download=False) or {}
+        title = info.get("title")
+        return title if isinstance(title, str) and title.strip() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[dict]:
     """Para YouTube: prueba varios videos candidatos (los 3 más largos de la
     búsqueda) y, para cada uno, varios clientes (web/mweb/ios…), ya que las IPs
@@ -473,17 +498,17 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
             fallback["_source"] = cand
             _push(fallback)
 
-    # Fallbacks: buscar la misma canción en YouTube Music y SoundCloud.
-    # Aquí sí se deduplica, para no repetir el mismo source recuperado con
-    # la resolución interna (que ya probó esos clientes arriba).
+    # Fallbacks: buscar la misma canción en otra plataforma (SoundCloud) al
+    # agotar los intentos de YouTube. También cubre URLs directas de YouTube:
+    # se obtiene el título y se reintenta en SoundCloud.
     m = re.match(r"^(yt|ym)search(\d*):(.*)$", original, re.IGNORECASE)
-    if m:
-        query = m.group(3)
-        qn = int(m.group(2)) if m.group(2).isdigit() and int(m.group(2)) > 1 else 1
+    fb_query = m.group(3) if m else _youtube_title(original, base)
+    if fb_query and fb_query.strip():
         fb_tpl = dict(reencode) if reencode else dict(base)
         seen: set[str] = set()
         for prefix in ("scsearch",):
-            for cand in _resolve_source(f"{prefix}{qn}:{query}")[:2]:
+            qn = int(m.group(2)) if m and m.group(2).isdigit() and int(m.group(2)) > 1 else 1
+            for cand in _resolve_source(f"{prefix}{qn}:{fb_query}")[:2]:
                 if re.match(rf"^{prefix}\d*:", cand):
                     continue  # no añadir búsquedas sin resolver (dan 404/scheme error)
                 if cand in seen:
