@@ -86,7 +86,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         elif data.startswith("save:"):
             await library.save_to_playlist(q, context, library.b64d(data[5:]))
         elif data.startswith("myrm:"):
-            await library.my_remove(q, context, library.b64d(data[6:]))
+            await library.my_remove(q, context, library.b64d(data[5:]))
         elif data.startswith("libsend:"):
             await library.lib_send(q, context, library.b64d(data[8:]))
         elif data.startswith("my:"):
