@@ -10,9 +10,11 @@ import base64
 import glob
 import logging
 import os
+import random
 import re
 import shutil
 import tempfile
+import time
 from typing import Callable, Awaitable, Optional
 
 import yt_dlp
@@ -64,6 +66,8 @@ USER_AGENT = "MusicPowerBot/1.0 (+https://t.me/MusicPowerBot)"
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
     "https://pipedapi.moomoo.me",
+    "https://api.piped.private.coffee",
+    "https://pipedapi.adminforge.de",
 ]
 INVIDIOUS_INSTANCES = [
     "https://yewtu.be",
@@ -203,56 +207,132 @@ def _spotify_track_info(source: str) -> Optional[dict]:
     return info
 
 
+# Estado del bloqueo temporal de YouTube desde la IP del datacenter: cuando
+# YouTube devuelve "Sign in to confirm you're not a bot", se evita martillear
+# con más peticiones y se salta directamente a SoundCloud durante un rato.
+_YT_GATED_UNTIL = 0.0
+
+BOT_CHECK_MARKERS = (
+    "Sign in to confirm you're not a bot",
+    "not a bot",
+    "The request cannot be completed",
+    "reload the page",
+    "Please sign in",
+)
+
+
+def _is_bot_check_message(msg: str) -> bool:
+    return any(m.lower() in (msg or "").lower() for m in BOT_CHECK_MARKERS)
+
+
+def _yt_gated() -> bool:
+    return time.monotonic() < _YT_GATED_UNTIL
+
+
+def _mark_yt_gated() -> None:
+    global _YT_GATED_UNTIL
+    _YT_GATED_UNTIL = time.monotonic() + 120
+
+
 def _resolve_source(source: str) -> list[str]:
     """Para búsquedas 'ytsearch…:'/'ymsearch…:'/'scsearch…:' devuelve hasta 3
     candidatos ordenados por duración (el más largo primero), para no bajar
     teasers, shorts o vistas previas de 30 segundos. También permite reintentar
     con otro video si el primero está bloqueado desde la IP del datacenter.
-    La resolución usa las cookies de YouTube; si el buscador de YouTube está
-    bloqueado (típico en datacenters), cae a las APIs públicas de Piped."""
+    Usa 'extract_flat' para no extraer cada resultado (más rápido y con menos
+    peticiones: los resultados DRM de SoundCloud no abortan la búsqueda)."""
     m = re.match(r"^(yt|ym|sc)search(\d*):(.*)$", source, re.IGNORECASE)
     if not m:
         return [source]
     prefix, qn, query = m.group(1), m.group(2), m.group(3)
-    n = int(qn) if qn.isdigit() and int(qn) > 1 else 5
+    n = min(int(qn) if qn.isdigit() and int(qn) > 1 else 5, 10)
     url = f"{prefix}search{n}:{query}"
+
+    for attempt in range(2):
+        try:
+            opts: dict = {
+                "quiet": True,
+                "no_warnings": True,
+                "simulate": True,
+                "noplaylist": True,
+                "skip_download": True,
+                "extract_flat": "in_playlist",
+                # El solver JS (deno en el contenedor) da el token POT para 'web';
+                # sin él, la búsqueda de YouTube desde IPs de datacenter da bot-check.
+                "remote_components": {"ejs:github", "ejs:npm"},
+            }
+            cookies_path = _write_youtube_cookies()
+            if cookies_path:
+                opts["cookiefile"] = cookies_path
+            if prefix in ("yt", "ym"):
+                opts["extractor_args"] = {
+                    "youtube": {"player_client": ["web", "tv_embedded"]}
+                }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False) or {}
+            entries = [e for e in (info.get("entries") or []) if e]
+            out: list[tuple[int, str]] = []
+            for e in entries:
+                dur = int(e.get("duration") or 0)
+                if dur and dur < 30:
+                    continue
+                cand = e.get("webpage_url") or e.get("url")
+                if not cand or re.match(rf"^{prefix}search\d*:", cand, re.IGNORECASE):
+                    continue
+                out.append((dur, cand))
+            out.sort(key=lambda x: x[0], reverse=True)
+            cands = [c for _, c in out[:3]]
+            if cands:
+                return cands
+            logger.warning("La búsqueda %s devolvió 0 candidatos", url)
+        except Exception as exc:  # noqa: BLE001
+            if attempt == 0:
+                logger.warning("No se pudo resolver la búsqueda %s: %s", url, exc)
+                if _is_bot_check_message(str(exc)) and prefix in ("yt", "ym"):
+                    _mark_yt_gated()
+
+    if prefix in ("yt", "ym"):
+        ext = _external_search(query)
+        if ext:
+            return ext
+        # YouTube caído/bloqueado: probar la misma búsqueda en SoundCloud.
+        return _resolve_sc(query)
+    return [source]
+
+
+def _resolve_sc(query: str, take: int = 3) -> list[str]:
+    """Busca `query` en SoundCloud y devuelve hasta `take` URLs de pistas.
+    No extrae cada pista (extract_flat), así que las pistas DRM no abortan la
+    búsqueda ni el plan de descarga."""
     try:
-        opts = {
+        opts: dict = {
             "quiet": True,
             "no_warnings": True,
             "simulate": True,
             "noplaylist": True,
             "skip_download": True,
-            # El solver JS (deno en el contenedor) da el token POT para 'web';
-            # sin él, la búsqueda de YouTube desde IPs de datacenter da bot-check.
+            "extract_flat": "in_playlist",
             "remote_components": {"ejs:github", "ejs:npm"},
         }
-        cookies_path = _write_youtube_cookies()
-        if cookies_path:
-            opts["cookiefile"] = cookies_path
-        if prefix in ("yt", "ym"):
-            opts["extractor_args"] = {
-                "youtube": {"player_client": ["web", "tv_embedded", "mweb"]}
-            }
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False) or {}
-        entries = [e for e in (info.get("entries") or []) if e and e.get("duration")]
-        entries.sort(key=lambda e: e["duration"], reverse=True)
-        out = []
-        for e in entries:
+            info = ydl.extract_info(f"scsearch5:{query}", download=False) or {}
+        out: list[tuple[int, str]] = []
+        for e in info.get("entries") or []:
+            if not e:
+                continue
             cand = e.get("webpage_url") or e.get("url")
-            if cand and len(out) < 3:
-                out.append(cand)
-        if out:
-            return out
-        logger.warning("La búsqueda %s devolvió 0 resultados", url)
+            dur = int(e.get("duration") or 0)
+            if not cand or dur and dur < 30:
+                continue
+            out.append((dur, cand))
+        out.sort(key=lambda x: x[0], reverse=True)
+        cands = [c for _, c in out[:take]]
+        if cands:
+            logger.info("SoundCloud: %d candidatos para %r", len(cands), query)
+            return cands
     except Exception as exc:  # noqa: BLE001
-        logger.warning("No se pudo resolver la búsqueda %s: %s", url, exc)
-    if prefix in ("yt", "ym"):
-        ext = _external_search(query)
-        if ext:
-            return ext
-    return [source]
+        logger.warning("No se pudo buscar en SoundCloud %r: %s", query, exc)
+    return []
 
 
 def _opts(outdir: str, quality: str, source: str) -> dict:
@@ -390,9 +470,15 @@ def _worker(
             break
         except Exception as exc:  # noqa: BLE001
             logger.warning("Intento %d falló: %s", i, exc)
+            if _is_bot_check_message(str(exc)):
+                _mark_yt_gated()
             if i == len(attempts):
                 raise DownloadError(str(exc)) from exc
             _flush_outdir(outdir)
+            # Pequeña pausa entre intentos: una ráfaga de peticiones rápidas
+            # empeora el bot-check de YouTube desde IPs de datacenter.
+            if _is_youtube(source):
+                time.sleep(1.5 + random.random() * 1.5)
 
     if info.get("_type") == "playlist":
         entries = info.get("entries") or [None]
@@ -452,14 +538,23 @@ def _youtube_title(source: str, base: dict) -> Optional[str]:
 
 
 def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[dict]:
-    """Para YouTube: prueba varios videos candidatos (los 3 más largos de la
+    """Para YouTube: prueba varios videos candidatos (los más largos de la
     búsqueda) y, para cada uno, varios clientes (web/mweb/ios…), ya que las IPs
     de datacenter suelen provocar 'Sign in…'/'The page needs to be reloaded' con
     un video y/o cliente concreto. El token POT (Proof of Origin) de bgutil se
-    usa automáticamente cuando el servidor local está activo. Como último
-    recurso se busca la misma canción en YouTube Music y en SoundCloud."""
-    if not _is_youtube(candidates[0]):
+    usa automáticamente cuando el servidor local está activo. Cuando YouTube
+    está bloqueado temporalmente (o como último recurso), se busca la misma
+    canción en SoundCloud."""
+    is_youtube = _is_youtube(candidates[0]) or bool(
+        re.match(r"^(yt|ym)search\d*:", original, re.IGNORECASE)
+    )
+    if not is_youtube:
         return [base]
+
+    # YouTube bloqueado en este momento: ir directo a SoundCloud sin martillar.
+    if re.match(r"^(yt|ym)search\d*:", candidates[0], re.IGNORECASE) or _yt_gated():
+        sc = _resolve_sc(_search_query(original), take=4)
+        return [dict(base, _source=c) for c in sc] or [base]
 
     reencode = None
     if "m4a" in base.get("format", ""):
@@ -476,13 +571,9 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
     attempts: list[dict] = []
 
     def _push(item: dict) -> None:
-        # Los combos de cliente comparten el mismo _source (no se colapsan a
-        # propósito: cada uno lleva su propio extractor_args). Solo se deduplica
-        # explícitamente lo que se añade en los fallbacks de más abajo.
         attempts.append(item)
 
-    # Cascada principal: 2 videos candidatos × varias clientes extra + un
-    # intento re-encodificado por si el nativo da "not available".
+    # Cascada principal: 2 videos candidatos × varios clientes extra.
     for ci, cand in enumerate(candidates[:2]):
         combos = [None] + YOUTUBE_CLIENTS if ci == 0 else ["mweb", "tv_embedded"]
         for cl in combos:
@@ -493,7 +584,7 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
                 }
             alt["_source"] = cand
             _push(alt)
-        if reencode is not None:
+        if reencode is not None and ci == 0:
             fallback = dict(reencode)
             fallback["_source"] = cand
             _push(fallback)
@@ -501,25 +592,25 @@ def _retry_attempts(base: dict, original: str, candidates: list[str]) -> list[di
     # Fallbacks: buscar la misma canción en otra plataforma (SoundCloud) al
     # agotar los intentos de YouTube. También cubre URLs directas de YouTube:
     # se obtiene el título y se reintenta en SoundCloud.
-    m = re.match(r"^(yt|ym)search(\d*):(.*)$", original, re.IGNORECASE)
-    fb_query = m.group(3) if m else _youtube_title(original, base)
+    fb_query = _search_query(original) or _youtube_title(original, base)
     if fb_query and fb_query.strip():
         fb_tpl = dict(reencode) if reencode else dict(base)
         seen: set[str] = set()
-        for prefix in ("scsearch",):
-            qn = int(m.group(2)) if m and m.group(2).isdigit() and int(m.group(2)) > 1 else 1
-            for cand in _resolve_source(f"{prefix}{qn}:{fb_query}")[:2]:
-                if re.match(rf"^{prefix}\d*:", cand):
-                    continue  # no añadir búsquedas sin resolver (dan 404/scheme error)
-                if cand in seen:
-                    continue
-                seen.add(cand)
-                fb = dict(fb_tpl)
-                fb["_source"] = cand
-                fb.pop("extractor_args", None)
-                _push(fb)
+        for cand in _resolve_sc(fb_query, take=3):
+            if cand in seen:
+                continue
+            seen.add(cand)
+            fb = dict(fb_tpl)
+            fb["_source"] = cand
+            fb.pop("extractor_args", None)
+            _push(fb)
 
     return attempts
+
+
+def _search_query(source: str) -> str:
+    m = re.match(r"^(yt|ym|sc)search\d*:(.*)$", source, re.IGNORECASE)
+    return m.group(2).strip() if m else ""
 
 
 def _flush_outdir(outdir: str) -> None:
