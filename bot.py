@@ -24,7 +24,7 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN
-from handlers import callbacks, commands, inline
+from handlers import callbacks, commands, inline, library
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,8 +43,15 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("search", commands.search))
     app.add_handler(CommandHandler("link", commands.link))
     app.add_handler(CommandHandler("stats", commands.stats))
+    app.add_handler(CommandHandler("song", library.song))
+    app.add_handler(CommandHandler("artist", library.artist))
+    app.add_handler(CommandHandler("my", library.my_command))
+    app.add_handler(CommandHandler("top", library.top_command))
+    app.add_handler(CommandHandler("settings", library.settings_command))
     app.add_handler(CallbackQueryHandler(callbacks.handle))
     app.add_handler(InlineQueryHandler(inline.inline_query))
+    app.add_handler(MessageHandler(filters.VOICE, library.on_voice))
+    app.add_handler(MessageHandler(filters.AUDIO | filters.Document.AUDIO, library.on_audio))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, commands.on_message))
 
     return app
@@ -180,6 +187,9 @@ async def keepalive() -> None:
 
 
 async def main() -> None:
+    from services import storage
+
+    storage.init()
     app = build_app()
     logging.info("✅ Bot arrancando con token %s…", BOT_TOKEN[:8] + "…")
     await app.initialize()

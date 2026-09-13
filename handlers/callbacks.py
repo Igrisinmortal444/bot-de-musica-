@@ -24,6 +24,8 @@ from services import search as search_api
 
 import state
 
+from handlers import library
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,6 +80,24 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         elif data.startswith("pv:"):
             _, token, idx = data.split(":")
             await _preview(q, context, token, int(idx))
+        elif data.startswith("qdl:"):
+            _, qual, token = data.split(":", 2)
+            await library.qdl(q, context, qual, library.b64d(token))
+        elif data.startswith("save:"):
+            await library.save_to_playlist(q, context, library.b64d(data[5:]))
+        elif data.startswith("myrm:"):
+            await library.my_remove(q, context, library.b64d(data[6:]))
+        elif data.startswith("libsend:"):
+            await library.lib_send(q, context, library.b64d(data[8:]))
+        elif data.startswith("my:"):
+            await library.my_page(q, context, int(data[3:]))
+        elif data.startswith("top:"):
+            await library.top_page(q, context, int(data[4:]))
+        elif data.startswith("lib:"):
+            _, token, idx = data.split(":", 2)
+            await library.lib_item(q, context, token, int(idx))
+        elif data.startswith("set:"):
+            await library.settings_toggle(q, context, data[4:])
     except TelegramError as exc:
         logger.warning("Callback fallido (%s): %s", data, exc)
     except ValueError:
